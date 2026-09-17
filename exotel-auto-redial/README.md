@@ -106,12 +106,20 @@ to `MAX_ATTEMPTS`, only inside business hours.
   commercial traffic under India's DND/TRAI rules - but that's a
   reasonable inference, not a legal confirmation. Check with whoever
   handles compliance before relying on it at volume.
-- Duration/price/final call status can update asynchronously a couple of
-  minutes after a call ends; this script only relies on the immediate
-  Connect Call response (`Call.Status`) to decide `connected` vs retry,
-  which is enough to drive the retry loop but not for billing reconciliation.
+- Placing a call returns almost immediately (the ring happens
+  asynchronously), so the script waits 25 seconds after each Connect Call
+  and then checks the call's real status before deciding `connected` vs
+  retry - otherwise a customer who doesn't pick up the callback (phone
+  off, busy, ignored) would get wrongly marked done. The exact status
+  value Exotel uses for "actually connected" (`completed` in the code)
+  wasn't independently confirmed against your account - if callbacks that
+  clearly connected keep getting retried anyway, check `Calls.json` for
+  that CallSid's real `Status` and adjust the comparison in
+  `getCallStatus_`/`connectCall_` in `Code.gs`.
 - Agents in `EXOTEL_FROM_NUMBERS` are rung one at a time, not
-  simultaneously - each unanswered ring costs a few seconds before the
-  next number is tried, so a long list makes each retry attempt slower
-  (still bounded and automatic, just not instant). Order the list with
-  your most-likely-available agent first.
+  simultaneously, and each one now takes ~25+ seconds (ring time + the
+  status check above) before moving to the next - so a full pass through
+  an 8-agent list can take a few minutes in the worst case where nobody
+  answers. Order the list with your most-likely-available agent first, and
+  keep the list short enough that a full pass stays well under Apps
+  Script's 6-minute execution limit.

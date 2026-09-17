@@ -214,8 +214,13 @@ function huntAndConnect_(cfg, phone) {
 
 /**
  * Calls Exotel's Connect Call API: rings `agentNumber` first, and bridges
- * to `phone` only once that leg answers. That answer/no-answer outcome IS
- * the "is this agent free" check - no separate agent-status polling needed.
+ * to `phone` only once that leg answers. Placing the call returns almost
+ * immediately (the ring/bridge happens asynchronously), so it does NOT by
+ * itself tell us whether the customer actually answered the callback -
+ * only that the request was accepted. We wait out a ring cycle and then
+ * check the call's real final status before deciding connected vs retry,
+ * otherwise a customer who doesn't pick up the callback (phone off, busy,
+ * ignored) would get wrongly marked "connected" and never retried.
  */
 function connectCall_(cfg, agentNumber, phone) {
   const url = 'https://' + cfg.subdomain + '/v1/Accounts/' + cfg.sid + '/Calls/connect.json';
@@ -242,11 +247,50 @@ function connectCall_(cfg, agentNumber, phone) {
     // non-JSON error body, leave body = {}
   }
 
-  if (code >= 200 && code < 300) {
-    const call = body.Call || {};
-    return { ok: true, connected: call.Status !== 'failed', callSid: call.Sid };
+  if (code < 200 || code >= 300) {
+    return { ok: false, error: body };
   }
-  return { ok: false, error: body };
+
+  const call = body.Call || {};
+  if (!call.Sid) {
+    return { ok: false, error: body };
+  }
+
+  Utilities.sleep(25000); // let one ring cycle play out before checking the real outcome
+  const finalStatus = getCallStatus_(cfg, call.Sid);
+  return { ok: true, connected: finalStatus === 'completed', callSid: call.Sid, finalStatus: finalStatus };
+}
+
+/**
+ * Fetches the call's current status from Exotel's Call Details API.
+ * "completed" is Exotel's status for a call that actually bridged both
+ * legs - anything else (no-answer, busy, failed, or still in-progress if
+ * 25s wasn't quite enough) is treated as not connected, so it gets retried.
+ * The exact set of status values wasn't independently confirmed while
+ * building this (Exotel's docs site was unreachable) - if callbacks that
+ * you can see actually connected keep getting retried anyway, check the
+ * `finalStatus` your Callbacks sheet would need a column added for, or
+ * inspect Calls.json for that CallSid, and adjust the comparison below.
+ */
+function getCallStatus_(cfg, callSid) {
+  const url = 'https://' + cfg.subdomain + '/v1/Accounts/' + cfg.sid + '/Calls/' + callSid + '.json';
+  const options = {
+    method: 'get',
+    headers: {
+      Authorization: 'Basic ' + Utilities.base64Encode(cfg.apiKey + ':' + cfg.apiToken),
+    },
+    muteHttpExceptions: true,
+  };
+  const response = UrlFetchApp.fetch(url, options);
+  if (response.getResponseCode() < 200 || response.getResponseCode() >= 300) {
+    return 'unknown';
+  }
+  try {
+    const body = JSON.parse(response.getContentText());
+    return (body.Call || {}).Status || 'unknown';
+  } catch (err) {
+    return 'unknown';
+  }
 }
 
 /** Time-driven trigger target: retries every row still pending. */
