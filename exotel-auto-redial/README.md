@@ -30,7 +30,8 @@ trigger a callback either.
 How it works: a Passthru applet inside your Exotel App Bazaar flow, wired
 to the support Connect applet's "No Answer" outcome, hits this script's
 web app URL with the caller's number. The script enqueues that number in a
-sheet, then queries Exotel's **CCM Users API** (`ccm-api.in.exotel.com`)
+sheet, then queries Exotel's **CCM Users API** (`ccm-api.exotel.com` -
+note: not the `.in.` subdomain, which returns 401 on this account)
 to see which of `EXOTEL_FROM_NUMBERS` are actually live/available right
 now, and tries Exotel's Connect Call API against just those, in turn -
 this is how a shift team (not everyone on duty at once) gets handled

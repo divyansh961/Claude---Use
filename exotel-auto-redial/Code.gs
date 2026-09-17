@@ -257,7 +257,7 @@ function getAvailableAgentNumbers_(cfg) {
   const knownAgents = {};
   cfg.fromNumbers.forEach((n) => { knownAgents[toE164_(n)] = true; });
 
-  const baseUrl = 'https://ccm-api.in.exotel.com/v2/accounts/' + cfg.sid + '/users?fields=devices&limit=50';
+  const baseUrl = 'https://ccm-api.exotel.com/v2/accounts/' + cfg.sid + '/users?fields=devices&limit=50';
   const options = {
     method: 'get',
     headers: {
@@ -286,7 +286,11 @@ function getAvailableAgentNumbers_(cfg) {
         const devices = (entry.data && entry.data.devices) || [];
         devices.forEach((device) => {
           const contact = toE164_(device.contact_uri || '');
-          const isAvailable = device.available === true || device.status === 'free';
+          // device.status was tested against a real agent who was
+          // provably "ON CALL" and still read "free" - not trustworthy on
+          // this account. Only device.available reflects real busy/free
+          // state; confirmed false while genuinely on a call.
+          const isAvailable = device.available === true;
           if (knownAgents[contact] && isAvailable) {
             available.push(contact);
           }
