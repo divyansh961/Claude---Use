@@ -42,7 +42,7 @@ to `MAX_ATTEMPTS`, only inside business hours.
    | `EXOTEL_API_KEY` | yes | | From Exotel dashboard -> Settings -> API Credentials |
    | `EXOTEL_API_TOKEN` | yes | | Same page as above |
    | `EXOTEL_CALLER_ID` | yes | `08040...` | ExoPhone to show as caller ID for the outbound leg |
-   | `EXOTEL_FROM_NUMBER` | yes | `09876...` | Number Connect Call rings first - your agent's number, or a hunt-group/ACD virtual number if you have several agents |
+   | `EXOTEL_FROM_NUMBERS` | yes | `09876...,09877...,09878...` | Comma-separated list of your shift agents' numbers. Exotel's Connect Call API only accepts one number per call (it can't take a Group the way the in-flow Connect applet can), so the script rings each one in turn until someone answers - this is how it copes with agents not all being available at once |
    | `EXOTEL_SUBDOMAIN` | no | `api.exotel.com` | Change if your account is on a regional subdomain (e.g. `api.in.exotel.com`) |
    | `WEBHOOK_SHARED_SECRET` | recommended | a random string | The Apps Script web app URL is publicly reachable; this rejects requests that don't include `?secret=...` |
    | `MAX_ATTEMPTS` | no | `3` | Total redial attempts before giving up |
@@ -86,8 +86,10 @@ to `MAX_ATTEMPTS`, only inside business hours.
      open that row's logged parameters, find the real caller-number value,
      and either fix the Passthru URL's param name or add it to the
      `candidates` array in `extractCallerNumber_` in `Code.gs`.
-   - Confirm `EXOTEL_FROM_NUMBER` actually rings and, once answered,
-     bridges to your test phone.
+   - Confirm the first agent in `EXOTEL_FROM_NUMBERS` actually rings and,
+     once answered, bridges to your test phone. Then try again with that
+     agent's phone unavailable/off to confirm it moves on to the next
+     number in the list.
 
 ## Sheets created automatically
 
@@ -108,3 +110,8 @@ to `MAX_ATTEMPTS`, only inside business hours.
   minutes after a call ends; this script only relies on the immediate
   Connect Call response (`Call.Status`) to decide `connected` vs retry,
   which is enough to drive the retry loop but not for billing reconciliation.
+- Agents in `EXOTEL_FROM_NUMBERS` are rung one at a time, not
+  simultaneously - each unanswered ring costs a few seconds before the
+  next number is tried, so a long list makes each retry attempt slower
+  (still bounded and automatic, just not instant). Order the list with
+  your most-likely-available agent first.

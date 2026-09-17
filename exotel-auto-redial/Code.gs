@@ -6,10 +6,11 @@
  * menu option (e.g. "press 2 for support"). That Passthru applet hits this
  * script's web app URL with the caller's number as a query param whenever
  * someone picks support and nobody in support answers. We queue that
- * number in a sheet and immediately try Connect Call (rings your agent/hunt
- * number first, bridges to the caller once that leg answers). If nobody's
- * free, a time-driven trigger retries every 5 minutes, capped at
- * MAX_ATTEMPTS, only within business hours.
+ * number in a sheet and immediately try Connect Call against each agent in
+ * EXOTEL_FROM_NUMBERS in turn (covers a shift team where not everyone's
+ * available at once), bridging the caller to whichever agent answers
+ * first. If nobody's free, a time-driven trigger retries every 5 minutes,
+ * capped at MAX_ATTEMPTS, only within business hours.
  *
  * This intentionally does NOT use Exotel's ExoPhone-level "Missed Call
  * Settings" - that only fires when the whole number goes unanswered, not
@@ -32,7 +33,10 @@ function getConfig_() {
     apiToken: p.getProperty('EXOTEL_API_TOKEN'),
     subdomain: p.getProperty('EXOTEL_SUBDOMAIN') || 'api.exotel.com',
     callerId: p.getProperty('EXOTEL_CALLER_ID'),
-    fromNumber: p.getProperty('EXOTEL_FROM_NUMBER'),
+    fromNumbers: (p.getProperty('EXOTEL_FROM_NUMBERS') || '')
+      .split(',')
+      .map((n) => n.trim())
+      .filter(Boolean),
     webhookSecret: p.getProperty('WEBHOOK_SHARED_SECRET') || '',
     maxAttempts: Number(p.getProperty('MAX_ATTEMPTS') || 3),
     businessStart: p.getProperty('BUSINESS_HOURS_START') || '09:00',
@@ -44,11 +48,13 @@ function getConfig_() {
     EXOTEL_API_KEY: cfg.apiKey,
     EXOTEL_API_TOKEN: cfg.apiToken,
     EXOTEL_CALLER_ID: cfg.callerId,
-    EXOTEL_FROM_NUMBER: cfg.fromNumber,
   };
   const missing = Object.keys(required).filter((k) => !required[k]);
   if (missing.length) {
     throw new Error('Missing required script properties: ' + missing.join(', '));
+  }
+  if (cfg.fromNumbers.length === 0) {
+    throw new Error('EXOTEL_FROM_NUMBERS script property is empty - set a comma-separated list of agent numbers');
   }
   return cfg;
 }
@@ -173,7 +179,7 @@ function attemptCallback_(sheet, rowIndex) {
   }
   if (!isWithinBusinessHours_(cfg)) return; // left pending, retried next cycle
 
-  const result = connectCall_(cfg, phone);
+  const result = huntAndConnect_(cfg, phone);
   const newAttempts = attempts + 1;
   sheet.getRange(rowIndex, 3).setValue(newAttempts);
   sheet.getRange(rowIndex, 5).setValue(new Date());
@@ -188,15 +194,33 @@ function attemptCallback_(sheet, rowIndex) {
 }
 
 /**
- * Calls Exotel's Connect Call API: rings cfg.fromNumber (your agent or hunt
- * group number) first, and bridges to `phone` only once that leg answers.
- * That answer/no-answer outcome IS the "is support free" check - no
- * separate agent-status polling needed.
+ * Exotel's Connect Call API only takes one agent number/SIP id in `From`
+ * per call - it doesn't accept a group the way the in-flow Connect applet
+ * does (that's a separate mechanism this API doesn't expose). To cover a
+ * shift team where "not all agents are available at all times", we ring
+ * cfg.fromNumbers one at a time, in order, stopping at the first one that
+ * answers. This all happens within a single retry attempt for the row.
  */
-function connectCall_(cfg, phone) {
+function huntAndConnect_(cfg, phone) {
+  let lastResult = { ok: false, error: 'no agent numbers configured' };
+  for (const agentNumber of cfg.fromNumbers) {
+    lastResult = connectCall_(cfg, agentNumber, phone);
+    if (lastResult.ok && lastResult.connected) {
+      return lastResult;
+    }
+  }
+  return lastResult;
+}
+
+/**
+ * Calls Exotel's Connect Call API: rings `agentNumber` first, and bridges
+ * to `phone` only once that leg answers. That answer/no-answer outcome IS
+ * the "is this agent free" check - no separate agent-status polling needed.
+ */
+function connectCall_(cfg, agentNumber, phone) {
   const url = 'https://' + cfg.subdomain + '/v1/Accounts/' + cfg.sid + '/Calls/connect.json';
   const payload = {
-    From: cfg.fromNumber,
+    From: agentNumber,
     To: phone,
     CallerId: cfg.callerId,
   };
