@@ -1,11 +1,20 @@
 /**
  * Exotel missed-call auto-redial.
  *
- * Flow: Exotel POSTs to doPost() when a call to your support ExoPhone goes
- * unanswered. We queue the caller's number in a sheet and immediately try
- * Connect Call (rings your agent/hunt number first, bridges to the caller
- * once that leg answers). If nobody's free, a time-driven trigger retries
- * every 5 minutes, capped at MAX_ATTEMPTS, only within business hours.
+ * Flow: your Exotel App Bazaar call flow has a Passthru applet wired into
+ * the "No Answer" outcome of the Connect applet that handles your support
+ * menu option (e.g. "press 2 for support"). That Passthru applet hits this
+ * script's web app URL with the caller's number as a query param whenever
+ * someone picks support and nobody in support answers. We queue that
+ * number in a sheet and immediately try Connect Call (rings your agent/hunt
+ * number first, bridges to the caller once that leg answers). If nobody's
+ * free, a time-driven trigger retries every 5 minutes, capped at
+ * MAX_ATTEMPTS, only within business hours.
+ *
+ * This intentionally does NOT use Exotel's ExoPhone-level "Missed Call
+ * Settings" - that only fires when the whole number goes unanswered, not
+ * when a caller reaches the IVR menu but a specific option (support) fails
+ * to connect. See README.md for how to wire the Passthru applet.
  *
  * All secrets/config live in Script Properties (Project Settings > Script
  * Properties) - see README.md for the full list and setup steps.
@@ -54,8 +63,25 @@ function getSheet_(name, headers) {
   return sheet;
 }
 
-/** Entry point Exotel's Missed Call webhook posts to (deploy as a Web App). */
+/**
+ * Entry points the Passthru applet hits (deploy as a Web App). Exotel's
+ * Passthru applet URL is configured by you (see README.md), so we don't
+ * need to guess field names - it's whatever query params you put in the
+ * applet's URL template, e.g. "?phone={CallFrom}&callsid={CallSid}".
+ * Wired to handle both GET and POST since the exact HTTP method Passthru
+ * uses wasn't confirmed while building this (couldn't reach Exotel's docs
+ * site from this environment) - check RawWebhookLogs after your first test
+ * call to confirm which one actually arrives.
+ */
+function doGet(e) {
+  return handleIncoming_(e);
+}
+
 function doPost(e) {
+  return handleIncoming_(e);
+}
+
+function handleIncoming_(e) {
   logRawWebhook_(e);
 
   const cfg = getConfig_();
@@ -77,15 +103,14 @@ function doPost(e) {
 }
 
 /**
- * Exotel's exact field name for the caller number on the missed-call
- * webhook isn't confirmed for your account/flow yet (couldn't reach
- * developer.exotel.com to verify while writing this). After the first real
- * missed call, check the RawWebhookLogs sheet and add the real field name
- * here if none of these candidates matched.
+ * Reads the caller's number from the query param you named in the
+ * Passthru applet's URL. Configure that URL with "phone={CallFrom}" (see
+ * README.md) so this always matches "phone" - the fallback candidates only
+ * exist in case you (or a future flow change) used a different name.
  */
 function extractCallerNumber_(e) {
   const params = e.parameter || {};
-  const candidates = ['CallFrom', 'From', 'Caller', 'caller_number', 'from'];
+  const candidates = ['phone', 'CallFrom', 'From', 'Caller', 'caller_number', 'from'];
   for (const key of candidates) {
     if (params[key]) return normalizePhone_(params[key]);
   }
