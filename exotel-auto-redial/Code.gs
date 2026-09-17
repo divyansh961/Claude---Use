@@ -104,8 +104,26 @@ function handleIncoming_(e) {
       .setMimeType(ContentService.MimeType.TEXT);
   }
 
+  // Safety net: if this Passthru ever fires on a call that actually got
+  // answered (e.g. it's wired to a branch shared with other logging, or
+  // the wrong outcome entirely), never queue a callback for it - that
+  // would mean auto-redialing a customer who was already helped, which is
+  // worse than doing nothing. Only proceed when the dial leg genuinely
+  // did not complete.
+  const dialStatus = ((e.parameter && e.parameter.DialCallStatus) || '').toLowerCase();
+  if (dialStatus === 'completed') {
+    logIgnored_(phone, dialStatus, 'DialCallStatus was completed - call was already answered');
+    return ContentService.createTextOutput('ignored: call was answered, no callback needed')
+      .setMimeType(ContentService.MimeType.TEXT);
+  }
+
   enqueueAndAttempt_(phone);
   return ContentService.createTextOutput('ok').setMimeType(ContentService.MimeType.TEXT);
+}
+
+function logIgnored_(phone, dialStatus, reason) {
+  const sheet = getSheet_('IgnoredWebhookHits', ['received_at', 'phone', 'dial_status', 'reason']);
+  sheet.appendRow([new Date(), phone, dialStatus, reason]);
 }
 
 /**

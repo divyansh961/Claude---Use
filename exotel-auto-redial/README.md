@@ -14,6 +14,19 @@ answers. Detecting that requires hooking into the specific Connect applet
 inside your call flow that handles the support option, at its "No Answer"
 outcome - see **Wiring it into your call flow** below.
 
+**Also verify which outcome your Passthru is actually attached to.** If
+you inserted it right after an existing Passthru applet that was already
+there (e.g. one feeding a CRM/helpdesk), check that outcome is genuinely
+"No Answer" and not "If Answered"/"On completion" - a CRM call-logging
+integration is often wired to log *every* completed call, which is the
+opposite of what you want here. As a safety net, the script itself now
+refuses to queue a callback if the payload's `DialCallStatus` is
+`completed` (see `handleIncoming_` in `Code.gs`) - real answered calls get
+logged to an `IgnoredWebhookHits` sheet instead of triggering a redial.
+But that's a backstop, not a substitute for wiring it to the right branch:
+if it's on the wrong outcome, you'll never see genuine missed calls
+trigger a callback either.
+
 How it works: a Passthru applet inside your Exotel App Bazaar flow, wired
 to the support Connect applet's "No Answer" outcome, hits this script's
 web app URL with the caller's number. The script enqueues that number in a
