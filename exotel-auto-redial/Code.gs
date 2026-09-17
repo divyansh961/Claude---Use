@@ -6,11 +6,13 @@
  * menu option (e.g. "press 2 for support"). That Passthru applet hits this
  * script's web app URL with the caller's number as a query param whenever
  * someone picks support and nobody in support answers. We queue that
- * number in a sheet and immediately try Connect Call against each agent in
- * EXOTEL_FROM_NUMBERS in turn (covers a shift team where not everyone's
- * available at once), bridging the caller to whichever agent answers
- * first. If nobody's free, a time-driven trigger retries every 5 minutes,
- * capped at MAX_ATTEMPTS, only within business hours.
+ * number in a sheet and immediately queries Exotel's CCM Users API to see
+ * which of EXOTEL_FROM_NUMBERS are actually live/available right now
+ * (covers a shift team where not everyone's on duty at once), then tries
+ * Connect Call against just those, in turn, bridging the caller to
+ * whichever agent answers first. If nobody's free, a time-driven trigger
+ * retries every 5 minutes, capped at MAX_ATTEMPTS, only within business
+ * hours.
  *
  * This intentionally does NOT use Exotel's ExoPhone-level "Missed Call
  * Settings" - that only fires when the whole number goes unanswered, not
@@ -215,19 +217,115 @@ function attemptCallback_(sheet, rowIndex) {
  * Exotel's Connect Call API only takes one agent number/SIP id in `From`
  * per call - it doesn't accept a group the way the in-flow Connect applet
  * does (that's a separate mechanism this API doesn't expose). To cover a
- * shift team where "not all agents are available at all times", we ring
- * cfg.fromNumbers one at a time, in order, stopping at the first one that
- * answers. This all happens within a single retry attempt for the row.
+ * shift team where "not all agents are available at all times", we first
+ * ask the CCM Users API which of EXOTEL_FROM_NUMBERS are actually live
+ * ("available") right now, and only ring those, in order, stopping at the
+ * first one that answers. If that live check itself fails (network/auth
+ * error - not "nobody's available", a genuine business state we should
+ * respect), we fall back to trying the full static list rather than doing
+ * nothing.
  */
 function huntAndConnect_(cfg, phone) {
-  let lastResult = { ok: false, error: 'no agent numbers configured' };
-  for (const agentNumber of cfg.fromNumbers) {
+  const availability = getAvailableAgentNumbers_(cfg);
+  const candidates = availability.ok ? availability.numbers : cfg.fromNumbers.map(toE164_);
+
+  if (availability.ok && candidates.length === 0) {
+    return { ok: false, error: 'no agents currently available per CCM Users API' };
+  }
+
+  let lastResult = { ok: false, error: 'no agent numbers to try' };
+  for (const agentNumber of candidates) {
     lastResult = connectCall_(cfg, agentNumber, phone);
     if (lastResult.ok && lastResult.connected) {
       return lastResult;
     }
   }
   return lastResult;
+}
+
+/**
+ * Queries Exotel's CCM Users API for live device availability, filtered to
+ * just the agents in EXOTEL_FROM_NUMBERS (an account can have many users;
+ * we only care about our support team). Returns { ok: true, numbers: [...] }
+ * with E.164 numbers of currently-available agents on success, or
+ * { ok: false, numbers: [] } if the API call itself failed - that's a
+ * different case from "API worked, nobody's available" (empty but ok:true),
+ * which huntAndConnect_ treats as a real "try again later," not a fallback
+ * trigger.
+ */
+function getAvailableAgentNumbers_(cfg) {
+  const knownAgents = {};
+  cfg.fromNumbers.forEach((n) => { knownAgents[toE164_(n)] = true; });
+
+  const baseUrl = 'https://ccm-api.in.exotel.com/v2/accounts/' + cfg.sid + '/users?fields=devices&limit=50';
+  const options = {
+    method: 'get',
+    headers: {
+      Authorization: 'Basic ' + Utilities.base64Encode(cfg.apiKey + ':' + cfg.apiToken),
+    },
+    muteHttpExceptions: true,
+  };
+
+  const available = [];
+  let offset = 0;
+  let pages = 0;
+
+  try {
+    while (pages < 5) {
+      const response = UrlFetchApp.fetch(baseUrl + '&offset=' + offset, options);
+      const rawText = response.getContentText();
+      logAgentAvailability_(offset, response.getResponseCode(), rawText);
+
+      if (response.getResponseCode() < 200 || response.getResponseCode() >= 300) {
+        return { ok: false, numbers: [] };
+      }
+
+      const body = JSON.parse(rawText);
+      const users = body.response || [];
+      users.forEach((entry) => {
+        const devices = (entry.data && entry.data.devices) || [];
+        devices.forEach((device) => {
+          const contact = toE164_(device.contact_uri || '');
+          const isAvailable = device.available === true || device.status === 'free';
+          if (knownAgents[contact] && isAvailable) {
+            available.push(contact);
+          }
+        });
+      });
+
+      const metadata = body.metadata || {};
+      const total = metadata.total || 0;
+      const count = metadata.count || users.length;
+      offset += count;
+      pages++;
+      if (count === 0 || offset >= total) break;
+    }
+    return { ok: true, numbers: available };
+  } catch (err) {
+    return { ok: false, numbers: [] };
+  }
+}
+
+function logAgentAvailability_(offset, responseCode, rawBody) {
+  const sheet = getSheet_('AgentAvailabilityLog', ['checked_at', 'offset', 'response_code', 'raw_body']);
+  sheet.appendRow([new Date(), offset, responseCode, rawBody]);
+}
+
+/**
+ * Normalizes a phone number to E.164 (+91...). Exotel's own CCM Users API
+ * stores device contact_uri in this format, and our Connect Call payloads
+ * were previously sent with a leading-zero domestic format instead - a
+ * plausible cause of the "invalid number" error reported when a redialed
+ * call was answered. Unconfirmed until tested against CallDetailsLog, but
+ * matching Exotel's own documented format is a reasonable fix to try.
+ */
+function toE164_(rawNumber) {
+  const raw = String(rawNumber || '').trim();
+  if (raw.startsWith('+')) return raw;
+  const digits = raw.replace(/[^0-9]/g, '');
+  if (digits.startsWith('0')) return '+91' + digits.slice(1);
+  if (digits.length === 10) return '+91' + digits;
+  return raw; // unrecognized format, pass through unchanged
 }
 
 /**
@@ -243,9 +341,9 @@ function huntAndConnect_(cfg, phone) {
 function connectCall_(cfg, agentNumber, phone) {
   const url = 'https://' + cfg.subdomain + '/v1/Accounts/' + cfg.sid + '/Calls/connect.json';
   const payload = {
-    From: agentNumber,
-    To: phone,
-    CallerId: cfg.callerId,
+    From: toE164_(agentNumber),
+    To: toE164_(phone),
+    CallerId: toE164_(cfg.callerId),
   };
   const options = {
     method: 'post',

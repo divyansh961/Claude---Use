@@ -30,11 +30,23 @@ trigger a callback either.
 How it works: a Passthru applet inside your Exotel App Bazaar flow, wired
 to the support Connect applet's "No Answer" outcome, hits this script's
 web app URL with the caller's number. The script enqueues that number in a
-sheet and immediately tries Exotel's Connect Call API, which rings your
-agent/hunt number first and only bridges the customer once that leg
-answers - that answer/no-answer outcome is the "agent is free" check, no
-separate polling needed. If nobody's free, a 5-minute trigger retries, up
-to `MAX_ATTEMPTS`, only inside business hours.
+sheet, then queries Exotel's **CCM Users API** (`ccm-api.in.exotel.com`)
+to see which of `EXOTEL_FROM_NUMBERS` are actually live/available right
+now, and tries Exotel's Connect Call API against just those, in turn -
+this is how a shift team (not everyone on duty at once) gets handled
+without a static list going stale. The agent leg answering is still the
+final "are they actually free" check, since a device can show available
+between the check and the dial. If nobody's free, a 5-minute trigger
+retries, up to `MAX_ATTEMPTS`, only inside business hours.
+
+**Phone number format**: everything is normalized to E.164 (`+91...`)
+before being sent to Exotel - `EXOTEL_FROM_NUMBERS`, the caller's number,
+and `EXOTEL_CALLER_ID` - via `toE164_` in `Code.gs`. This matches the
+format Exotel's own CCM Users API returns for `contact_uri`, and is a
+likely fix for an "invalid number" error seen when a redialed call was
+answered (previously numbers were sent in leading-zero domestic format
+like `09108213860`). Confirm this resolved it by checking
+`CallDetailsLog` after a live test.
 
 ## Setup
 
@@ -109,6 +121,9 @@ to `MAX_ATTEMPTS`, only inside business hours.
 - **Callbacks** - the queue: `phone, missed_at, attempts, status, last_attempt_at, call_sid`.
   `status` is one of `pending`, `connected`, `exhausted`.
 - **RawWebhookLogs** - every raw webhook hit, for debugging field names.
+- **IgnoredWebhookHits** - webhook hits skipped because the call was already answered (`DialCallStatus: completed`).
+- **CallDetailsLog** - full raw response from every post-callback status check, for diagnosing whether a call actually connected.
+- **AgentAvailabilityLog** - full raw response from every CCM Users API availability check, for diagnosing the live shift-rotation query.
 
 ## Known limits
 
