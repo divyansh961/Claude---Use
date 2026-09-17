@@ -281,14 +281,15 @@ function connectCall_(cfg, agentNumber, phone) {
 
 /**
  * Fetches the call's current status from Exotel's Call Details API.
- * "completed" is Exotel's status for a call that actually bridged both
- * legs - anything else (no-answer, busy, failed, or still in-progress if
- * 25s wasn't quite enough) is treated as not connected, so it gets retried.
- * The exact set of status values wasn't independently confirmed while
- * building this (Exotel's docs site was unreachable) - if callbacks that
- * you can see actually connected keep getting retried anyway, check the
- * `finalStatus` your Callbacks sheet would need a column added for, or
- * inspect Calls.json for that CallSid, and adjust the comparison below.
+ * "completed" turned out NOT to reliably mean "the customer actually got
+ * bridged to the agent" - real tests showed it marked "connected" on
+ * callbacks the customer confirms did not actually connect. Rather than
+ * guess again at which field/threshold (e.g. Duration) actually
+ * distinguishes a real bridge from an agent-leg-only blip, this now logs
+ * the FULL raw response to a CallDetailsLog sheet on every check, so the
+ * next real test gives us evidence instead of another guess. Treat the
+ * `connected` decision this returns as provisional until that log is
+ * reviewed against what actually happened on a real call.
  */
 function getCallStatus_(cfg, callSid) {
   const url = 'https://' + cfg.subdomain + '/v1/Accounts/' + cfg.sid + '/Calls/' + callSid + '.json';
@@ -300,15 +301,23 @@ function getCallStatus_(cfg, callSid) {
     muteHttpExceptions: true,
   };
   const response = UrlFetchApp.fetch(url, options);
+  const rawText = response.getContentText();
+  logCallDetails_(callSid, response.getResponseCode(), rawText);
+
   if (response.getResponseCode() < 200 || response.getResponseCode() >= 300) {
     return 'unknown';
   }
   try {
-    const body = JSON.parse(response.getContentText());
+    const body = JSON.parse(rawText);
     return (body.Call || {}).Status || 'unknown';
   } catch (err) {
     return 'unknown';
   }
+}
+
+function logCallDetails_(callSid, responseCode, rawBody) {
+  const sheet = getSheet_('CallDetailsLog', ['checked_at', 'call_sid', 'response_code', 'raw_body']);
+  sheet.appendRow([new Date(), callSid, responseCode, rawBody]);
 }
 
 /** Time-driven trigger target: retries every row still pending. */
