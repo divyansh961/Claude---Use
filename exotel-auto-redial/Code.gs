@@ -106,6 +106,19 @@ function handleIncoming_(e) {
       .setMimeType(ContentService.MimeType.TEXT);
   }
 
+  // Confirmed happening in practice: the same missed call fires this
+  // webhook twice (~25-35s apart, identical CallSid), likely because the
+  // capture Passthru is wired into two chained nodes that both execute for
+  // one call. Rather than rely on getting Exotel's flow wiring exactly
+  // right, dedupe by CallSid so a duplicate delivery can never queue a
+  // second callback for the same missed call - this is what was causing
+  // the customer to get called twice within about 30 seconds.
+  const callSid = (e.parameter && e.parameter.CallSid) || '';
+  if (callSid && isDuplicateCallSid_(callSid)) {
+    return ContentService.createTextOutput('ignored: duplicate CallSid, already processed')
+      .setMimeType(ContentService.MimeType.TEXT);
+  }
+
   // Safety net: if this Passthru ever fires on a call that actually got
   // answered (e.g. it's wired to a branch shared with other logging, or
   // the wrong outcome entirely), never queue a callback for it - that
@@ -121,6 +134,29 @@ function handleIncoming_(e) {
 
   enqueueAndAttempt_(phone);
   return ContentService.createTextOutput('ok').setMimeType(ContentService.MimeType.TEXT);
+}
+
+/**
+ * Guards against the same missed-call event firing this webhook more than
+ * once. Uses a script lock so two near-simultaneous webhook hits for the
+ * same CallSid can't both slip past the check before either has recorded
+ * it - without this, two concurrent executions could both see "not seen
+ * yet" and both proceed.
+ */
+function isDuplicateCallSid_(callSid) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    const sheet = getSheet_('ProcessedCallSids', ['call_sid', 'first_seen_at']);
+    const data = sheet.getDataRange().getValues();
+    for (let i = 1; i < data.length; i++) {
+      if (data[i][0] === callSid) return true;
+    }
+    sheet.appendRow([callSid, new Date()]);
+    return false;
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 function logIgnored_(phone, dialStatus, reason) {

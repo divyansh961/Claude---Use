@@ -125,6 +125,7 @@ like `09108213860`). Confirm this resolved it by checking
 - **IgnoredWebhookHits** - webhook hits skipped because the call was already answered (`DialCallStatus: completed`).
 - **CallDetailsLog** - full raw response from every post-callback status check, for diagnosing whether a call actually connected.
 - **AgentAvailabilityLog** - full raw response from every CCM Users API availability check, for diagnosing the live shift-rotation query.
+- **ProcessedCallSids** - every CallSid this webhook has already handled. Confirmed in practice that the same missed call fires the webhook twice (~25-35s apart, identical CallSid) - very likely because the capture Passthru got wired into two chained nodes (both Freshdesk-ticket paths) that both execute for one call. This sheet prevents a duplicate delivery from ever queuing a second callback for the same missed call, which is what was causing a customer to get called twice within about 30 seconds for one missed call.
 
 ## Known limits
 
